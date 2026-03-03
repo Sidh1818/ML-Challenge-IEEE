@@ -1,309 +1,386 @@
 """
-============================================================================
-  ML Challenge — Binary Fault Detection Pipeline
-  IEEE SB, GEHU | Online Qualifiers
-============================================================================
+Binary Fault Detection - ML Challenge Submission
+IEEE SB GEHU | Team Tech Ninjas
 
-  Task:      Predict device operational status (Normal=0, Faulty=1)
-  Features:  47 sensor readings (F01–F47) → preprocessed to 36 → engineered to 83
-  Approach:  Feature Engineering + Tuned LightGBM
-  Output:    FINAL.csv (ID → CLASS)
+This script trains a machine learning model to detect faults in industrial sensors.
+We use feature engineering and ensemble methods to achieve high accuracy.
 
-  Pipeline:
-    1. Load preprocessed data (TRAIN_PREPROCESSED.csv, TEST_PREPROCESSED.csv)
-    2. Engineer 47 new features (interactions, aggregates, polynomials)
-    3. Train optimized LightGBM with 5-fold stratified cross-validation
-    4. Generate predictions on test set → FINAL.csv
-
-  Requirements: numpy, pandas, scikit-learn, xgboost, lightgbm
-============================================================================
+Authors: Rajat Pundir, Sidh Khurana
+Date: January 2025
 """
 
 import numpy as np
 import pandas as pd
 import time
 import warnings
-from typing import List, Tuple
+warnings.filterwarnings('ignore')
 
 from sklearn.model_selection import StratifiedKFold, cross_val_score
-from sklearn.ensemble import ExtraTreesClassifier, VotingClassifier
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from sklearn.ensemble import ExtraTreesClassifier
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
 
-warnings.filterwarnings('ignore')
-np.random.seed(42)
+# Set random seed for reproducibility
+SEED = 42
+np.random.seed(SEED)
 
-# ============================================================
-#  Configuration
-# ============================================================
-RANDOM_STATE = 42
-CV_FOLDS = 5
-TRAIN_PATH = 'TRAIN_PREPROCESSED.csv'
-TEST_PATH = 'TEST_PREPROCESSED.csv'
-OUTPUT_PATH = 'FINAL.csv'
+# File paths
+TRAIN_FILE = 'TRAIN_PREPROCESSED.csv'
+TEST_FILE = 'TEST_PREPROCESSED.csv'
+SUBMISSION_FILE = 'FINAL.csv'
 
-# Top predictive features identified via correlation analysis (|r| > 0.33)
-TOP_FEATURES = ['F05', 'F06', 'F07', 'F09', 'F19', 'F21']
-
-# Feature interaction pairs (chosen from top correlated features)
-INTERACTION_PAIRS: List[Tuple[str, str]] = [
-    ('F05', 'F09'), ('F05', 'F19'), ('F05', 'F21'),
-    ('F06', 'F07'), ('F06', 'F09'),
-    ('F09', 'F19'), ('F09', 'F21'),
-    ('F19', 'F21'),
-]
-
-# Ratio feature pairs
-RATIO_PAIRS: List[Tuple[str, str]] = [
-    ('F19', 'F09'), ('F21', 'F09'), ('F05', 'F06'),
-]
-
-# Sensor groups (from domain analysis of feature structure)
-SENSOR_GROUPS = {
-    'early': ['F02', 'F03', 'F04', 'F05', 'F06', 'F07', 'F09'],
-    'mid':   ['F10', 'F11', 'F12', 'F13', 'F14', 'F15', 'F16', 'F17', 'F18'],
-    'high':  ['F30', 'F31', 'F32', 'F33', 'F34', 'F35', 'F36'],
-    'late':  ['F39', 'F40', 'F42', 'F43', 'F44', 'F45', 'F46', 'F47'],
-}
+# Cross-validation settings
+NUM_FOLDS = 5
 
 
-# ============================================================
-#  Feature Engineering
-# ============================================================
-def engineer_features(df: pd.DataFrame, feature_cols: List[str]) -> pd.DataFrame:
+def create_interaction_features(data, cols):
     """
-    Engineer new features from preprocessed sensor data.
-
-    Adds 47 features across 7 categories:
-      - 8 interaction features (product of top predictor pairs)
-      - 3 ratio features (division of correlated pairs)
-      - 11 row-wise aggregate features (statistical summaries per sample)
-      - 11 sensor group aggregates (mean/std/max per sensor group)
-      - 6 polynomial features (squared top predictors)
-      - 6 absolute value features
-      - 2 cross-group interaction features
-
-    Args:
-        df: DataFrame with preprocessed features
-        feature_cols: List of original feature column names
-
-    Returns:
-        DataFrame with original + engineered features
+    Create interaction features by multiplying important sensor pairs.
+    These capture relationships between different sensors.
     """
-    result = df.copy()
-    available_cols = set(df.columns)
-
-    # 1. Interaction features: capture non-linear relationships
-    for f1, f2 in INTERACTION_PAIRS:
-        if f1 in available_cols and f2 in available_cols:
-            result[f'{f1}_x_{f2}'] = df[f1] * df[f2]
-
-    # 2. Ratio features: capture relative sensor magnitudes
-    for f1, f2 in RATIO_PAIRS:
-        if f1 in available_cols and f2 in available_cols:
-            result[f'{f1}_div_{f2}'] = df[f1] / (df[f2] + 1e-8)
-
-    # 3. Row-wise aggregates: capture holistic device behavior
-    feature_matrix = df[feature_cols].values
-    result['row_mean'] = np.mean(feature_matrix, axis=1)
-    result['row_std'] = np.std(feature_matrix, axis=1)
-    result['row_max'] = np.max(feature_matrix, axis=1)
-    result['row_min'] = np.min(feature_matrix, axis=1)
-    result['row_range'] = result['row_max'] - result['row_min']
-    result['row_median'] = np.median(feature_matrix, axis=1)
-    result['row_skew'] = pd.DataFrame(feature_matrix).apply(
-        lambda x: x.skew(), axis=1
-    ).values
-    result['row_kurtosis'] = pd.DataFrame(feature_matrix).apply(
-        lambda x: x.kurtosis(), axis=1
-    ).values
-    result['row_n_positive'] = np.sum(feature_matrix > 0, axis=1)
-    result['row_n_high'] = np.sum(feature_matrix > 1.0, axis=1)
-    result['row_abs_sum'] = np.sum(np.abs(feature_matrix), axis=1)
-
-    # 4. Sensor group aggregates: exploit known sensor structure
-    group_means = {}
-    for group_name, group_cols in SENSOR_GROUPS.items():
-        valid_cols = [c for c in group_cols if c in available_cols]
-        if valid_cols:
-            group_means[group_name] = df[valid_cols].mean(axis=1)
-            result[f'grp_{group_name}_mean'] = group_means[group_name]
-            result[f'grp_{group_name}_std'] = df[valid_cols].std(axis=1)
-            if group_name != 'late':  # max less informative for late sensors
-                result[f'grp_{group_name}_max'] = df[valid_cols].max(axis=1)
-
-    # 5. Polynomial features: capture quadratic relationships
-    for f in TOP_FEATURES:
-        if f in available_cols:
-            result[f'{f}_sq'] = df[f] ** 2
-
-    # 6. Absolute value features: magnitude matters for fault detection
-    for f in TOP_FEATURES:
-        if f in available_cols:
-            result[f'{f}_abs'] = np.abs(df[f])
-
-    # 7. Cross-group interactions: capture inter-system relationships
-    if 'early' in group_means and 'mid' in group_means:
-        result['grp_early_x_mid'] = group_means['early'] * group_means['mid']
-    if 'early' in group_means and 'high' in group_means:
-        result['grp_early_x_high'] = group_means['early'] * group_means['high']
-
-    return result
+    df = data.copy()
+    
+    # Key sensor pairs that showed high correlation with target
+    important_pairs = [
+        ('F05', 'F09'), ('F05', 'F19'), ('F05', 'F21'),
+        ('F06', 'F07'), ('F06', 'F09'),
+        ('F09', 'F19'), ('F09', 'F21'),
+        ('F19', 'F21')
+    ]
+    
+    for sensor1, sensor2 in important_pairs:
+        if sensor1 in df.columns and sensor2 in df.columns:
+            df[f'{sensor1}_{sensor2}_interaction'] = df[sensor1] * df[sensor2]
+    
+    return df
 
 
-# ============================================================
-#  Model Definitions
-# ============================================================
-def get_models() -> dict:
+def create_ratio_features(data):
     """
-    Return tuned model configurations.
-
-    Hyperparameters were optimized via RandomizedSearchCV (50 iterations,
-    5-fold CV) in the exploration phase. LightGBM achieved the best
-    individual CV F1-Score.
+    Create ratio features to capture relative sensor magnitudes.
+    Ratios can reveal patterns that raw values miss.
     """
-    return {
-        'XGBoost': XGBClassifier(
-            n_estimators=800, learning_rate=0.05, max_depth=8,
-            subsample=0.9, colsample_bytree=0.8,
-            reg_alpha=0.1, reg_lambda=2,
-            random_state=RANDOM_STATE, eval_metric='logloss', n_jobs=-1,
-        ),
-        'LightGBM': LGBMClassifier(
-            n_estimators=800, learning_rate=0.05, max_depth=-1,
-            num_leaves=100, subsample=1.0, colsample_bytree=0.7,
-            reg_alpha=0.1, reg_lambda=1,
-            random_state=RANDOM_STATE, verbose=-1, n_jobs=-1,
-        ),
-        'ExtraTrees': ExtraTreesClassifier(
-            n_estimators=600, max_depth=None,
-            min_samples_split=2, min_samples_leaf=1, max_features='sqrt',
-            random_state=RANDOM_STATE, n_jobs=-1,
-        ),
+    df = data.copy()
+    
+    # Create ratios for key sensor combinations
+    ratio_pairs = [('F19', 'F09'), ('F21', 'F09'), ('F05', 'F06')]
+    
+    for numerator, denominator in ratio_pairs:
+        if numerator in df.columns and denominator in df.columns:
+            # Add small epsilon to avoid division by zero
+            df[f'{numerator}_to_{denominator}_ratio'] = df[numerator] / (df[denominator] + 0.00000001)
+    
+    return df
+
+
+def create_statistical_features(data, feature_columns):
+    """
+    Create statistical summary features across all sensors for each sample.
+    This captures overall device behavior patterns.
+    """
+    df = data.copy()
+    
+    # Get all sensor values as a matrix
+    sensor_values = df[feature_columns].values
+    
+    # Basic statistics
+    df['sensors_mean'] = np.mean(sensor_values, axis=1)
+    df['sensors_std'] = np.std(sensor_values, axis=1)
+    df['sensors_max'] = np.max(sensor_values, axis=1)
+    df['sensors_min'] = np.min(sensor_values, axis=1)
+    df['sensors_range'] = df['sensors_max'] - df['sensors_min']
+    df['sensors_median'] = np.median(sensor_values, axis=1)
+    
+    # Advanced statistics
+    df['sensors_skewness'] = pd.DataFrame(sensor_values).apply(lambda x: x.skew(), axis=1).values
+    df['sensors_kurtosis'] = pd.DataFrame(sensor_values).apply(lambda x: x.kurtosis(), axis=1).values
+    
+    # Count-based features
+    df['positive_sensor_count'] = np.sum(sensor_values > 0, axis=1)
+    df['high_value_count'] = np.sum(sensor_values > 1.0, axis=1)
+    df['total_abs_magnitude'] = np.sum(np.abs(sensor_values), axis=1)
+    
+    return df
+
+
+def create_group_features(data):
+    """
+    Create features based on sensor groups.
+    Sensors are grouped by their position/function in the system.
+    """
+    df = data.copy()
+    
+    # Define sensor groups based on feature analysis
+    groups = {
+        'early_sensors': ['F02', 'F03', 'F04', 'F05', 'F06', 'F07', 'F09'],
+        'middle_sensors': ['F10', 'F11', 'F12', 'F13', 'F14', 'F15', 'F16', 'F17', 'F18'],
+        'high_range_sensors': ['F30', 'F31', 'F32', 'F33', 'F34', 'F35', 'F36'],
+        'late_sensors': ['F39', 'F40', 'F42', 'F43', 'F44', 'F45', 'F46', 'F47']
     }
+    
+    group_stats = {}
+    
+    for group_name, sensor_list in groups.items():
+        # Only use sensors that exist in the data
+        available_sensors = [s for s in sensor_list if s in df.columns]
+        
+        if available_sensors:
+            group_stats[group_name] = df[available_sensors].mean(axis=1)
+            df[f'{group_name}_avg'] = group_stats[group_name]
+            df[f'{group_name}_std'] = df[available_sensors].std(axis=1)
+            
+            # Max is useful for most groups
+            if group_name != 'late_sensors':
+                df[f'{group_name}_max'] = df[available_sensors].max(axis=1)
+    
+    # Cross-group interactions
+    if 'early_sensors' in group_stats and 'middle_sensors' in group_stats:
+        df['early_middle_interaction'] = group_stats['early_sensors'] * group_stats['middle_sensors']
+    
+    if 'early_sensors' in group_stats and 'high_range_sensors' in group_stats:
+        df['early_high_interaction'] = group_stats['early_sensors'] * group_stats['high_range_sensors']
+    
+    return df
 
 
-# ============================================================
-#  Cross-Validation
-# ============================================================
-def evaluate_models(models: dict, X: np.ndarray, y: np.ndarray) -> dict:
+def create_polynomial_features(data):
     """
-    Run 5-fold stratified cross-validation on all models.
-
-    Returns dict mapping model name to CV metrics (f1, accuracy, roc_auc).
+    Create squared features for top predictors.
+    Polynomial features can capture non-linear relationships.
     """
-    cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
-    results = {}
+    df = data.copy()
+    
+    # Top features identified from correlation analysis
+    top_sensors = ['F05', 'F06', 'F07', 'F09', 'F19', 'F21']
+    
+    for sensor in top_sensors:
+        if sensor in df.columns:
+            df[f'{sensor}_squared'] = df[sensor] ** 2
+            df[f'{sensor}_absolute'] = np.abs(df[sensor])
+    
+    return df
 
-    for name, model in models.items():
-        print(f"\n   Cross-validating {name}...")
-        start = time.time()
 
-        f1 = cross_val_score(model, X, y, cv=cv, scoring='f1', n_jobs=-1)
-        acc = cross_val_score(model, X, y, cv=cv, scoring='accuracy', n_jobs=-1)
-        roc = cross_val_score(model, X, y, cv=cv, scoring='roc_auc', n_jobs=-1)
+def engineer_all_features(data, original_features):
+    """
+    Main feature engineering pipeline.
+    Combines all feature creation methods.
+    """
+    print("    Creating interaction features...")
+    data = create_interaction_features(data, original_features)
+    
+    print("    Creating ratio features...")
+    data = create_ratio_features(data)
+    
+    print("    Creating statistical features...")
+    data = create_statistical_features(data, original_features)
+    
+    print("    Creating group-based features...")
+    data = create_group_features(data)
+    
+    print("    Creating polynomial features...")
+    data = create_polynomial_features(data)
+    
+    return data
 
-        elapsed = time.time() - start
-        results[name] = {
-            'f1': f1.mean(), 'f1_std': f1.std(),
-            'acc': acc.mean(), 'acc_std': acc.std(),
-            'roc': roc.mean(), 'roc_std': roc.std(),
-            'time': elapsed,
+
+def build_models():
+    """
+    Initialize machine learning models with optimized hyperparameters.
+    These parameters were tuned through experimentation.
+    """
+    models = {}
+    
+    # XGBoost - gradient boosting with regularization
+    models['XGBoost'] = XGBClassifier(
+        n_estimators=800,
+        learning_rate=0.05,
+        max_depth=8,
+        subsample=0.9,
+        colsample_bytree=0.8,
+        reg_alpha=0.1,
+        reg_lambda=2,
+        random_state=SEED,
+        eval_metric='logloss',
+        n_jobs=-1
+    )
+    
+    # LightGBM - fast gradient boosting
+    models['LightGBM'] = LGBMClassifier(
+        n_estimators=800,
+        learning_rate=0.05,
+        max_depth=-1,
+        num_leaves=100,
+        subsample=1.0,
+        colsample_bytree=0.7,
+        reg_alpha=0.1,
+        reg_lambda=1,
+        random_state=SEED,
+        verbose=-1,
+        n_jobs=-1
+    )
+    
+    # Extra Trees - ensemble of randomized decision trees
+    models['ExtraTrees'] = ExtraTreesClassifier(
+        n_estimators=600,
+        max_depth=None,
+        min_samples_split=2,
+        min_samples_leaf=1,
+        max_features='sqrt',
+        random_state=SEED,
+        n_jobs=-1
+    )
+    
+    return models
+
+
+def evaluate_model_performance(models, X_train, y_train):
+    """
+    Evaluate all models using cross-validation.
+    Returns performance metrics for each model.
+    """
+    cv_splitter = StratifiedKFold(n_splits=NUM_FOLDS, shuffle=True, random_state=SEED)
+    performance_results = {}
+    
+    for model_name, model in models.items():
+        print(f"\n  Evaluating {model_name}...")
+        start_time = time.time()
+        
+        # Calculate metrics using cross-validation
+        f1_scores = cross_val_score(model, X_train, y_train, cv=cv_splitter, scoring='f1', n_jobs=-1)
+        accuracy_scores = cross_val_score(model, X_train, y_train, cv=cv_splitter, scoring='accuracy', n_jobs=-1)
+        auc_scores = cross_val_score(model, X_train, y_train, cv=cv_splitter, scoring='roc_auc', n_jobs=-1)
+        
+        elapsed_time = time.time() - start_time
+        
+        # Store results
+        performance_results[model_name] = {
+            'f1_mean': f1_scores.mean(),
+            'f1_std': f1_scores.std(),
+            'accuracy_mean': accuracy_scores.mean(),
+            'accuracy_std': accuracy_scores.std(),
+            'auc_mean': auc_scores.mean(),
+            'auc_std': auc_scores.std(),
+            'training_time': elapsed_time
         }
+        
+        # Print results
+        print(f"    Accuracy: {accuracy_scores.mean():.4f} (+/- {accuracy_scores.std():.4f})")
+        print(f"    F1 Score: {f1_scores.mean():.4f} (+/- {f1_scores.std():.4f})")
+        print(f"    ROC AUC:  {auc_scores.mean():.4f} (+/- {auc_scores.std():.4f})")
+        print(f"    Time:     {elapsed_time:.1f} seconds")
+    
+    return performance_results
 
-        print(f"      Accuracy : {acc.mean():.4f} +/- {acc.std():.4f}")
-        print(f"      F1-Score : {f1.mean():.4f} +/- {f1.std():.4f}")
-        print(f"      ROC-AUC  : {roc.mean():.4f} +/- {roc.std():.4f}")
-        print(f"      Time     : {elapsed:.1f}s")
 
-    return results
-
-
-# ============================================================
-#  Main Pipeline
-# ============================================================
 def main():
-    print("=" * 65)
-    print("  ML CHALLENGE - IMPROVED MODEL PIPELINE")
-    print("=" * 65)
-
-    # --- Step 1: Load Data ---
-    df_train = pd.read_csv(TRAIN_PATH)
-    df_test = pd.read_csv(TEST_PATH)
-
-    feature_cols = [c for c in df_train.columns if c != 'Class']
-    X_raw = df_train[feature_cols].copy()
-    y = df_train['Class'].values
-    test_ids = df_test['ID'].values
-    X_test_raw = df_test[feature_cols].copy()
-
-    print(f"\n  [1/6] Data Loaded:")
-    print(f"        Train: {X_raw.shape[0]} samples x {X_raw.shape[1]} features")
-    print(f"        Test:  {X_test_raw.shape[0]} samples x {X_test_raw.shape[1]} features")
-    print(f"        Classes: Normal={int((y==0).sum())} | Faulty={int((y==1).sum())}")
-
-    # --- Step 2: Feature Engineering ---
-    print(f"\n  [2/6] Feature Engineering...")
-    X_train_eng = engineer_features(X_raw, feature_cols)
-    X_test_eng = engineer_features(X_test_raw, feature_cols)
-    eng_cols = list(X_train_eng.columns)
-    print(f"        {len(feature_cols)} -> {len(eng_cols)} features (+{len(eng_cols)-len(feature_cols)} new)")
-
-    # --- Step 3: Scale ---
-    print(f"\n  [3/6] Scaling features...")
+    """
+    Main execution pipeline for the fault detection system.
+    """
+    print("=" * 70)
+    print("  BINARY FAULT DETECTION SYSTEM - ML CHALLENGE")
+    print("  Team Tech Ninjas | IEEE SB GEHU")
+    print("=" * 70)
+    
+    # Step 1: Load preprocessed data
+    print("\n[Step 1/6] Loading preprocessed data...")
+    train_data = pd.read_csv(TRAIN_FILE)
+    test_data = pd.read_csv(TEST_FILE)
+    
+    # Separate features and target
+    original_features = [col for col in train_data.columns if col != 'Class']
+    X_train_raw = train_data[original_features].copy()
+    y_train = train_data['Class'].values
+    
+    test_ids = test_data['ID'].values
+    X_test_raw = test_data[original_features].copy()
+    
+    print(f"  Training samples: {len(X_train_raw)}")
+    print(f"  Test samples: {len(X_test_raw)}")
+    print(f"  Original features: {len(original_features)}")
+    print(f"  Normal cases: {(y_train == 0).sum()}")
+    print(f"  Fault cases: {(y_train == 1).sum()}")
+    
+    # Step 2: Feature engineering
+    print("\n[Step 2/6] Engineering new features...")
+    X_train_engineered = engineer_all_features(X_train_raw, original_features)
+    X_test_engineered = engineer_all_features(X_test_raw, original_features)
+    
+    total_features = len(X_train_engineered.columns)
+    new_features = total_features - len(original_features)
+    print(f"  Total features after engineering: {total_features}")
+    print(f"  New features created: {new_features}")
+    
+    # Step 3: Feature scaling
+    print("\n[Step 3/6] Scaling features...")
     scaler = StandardScaler()
-    X_train = scaler.fit_transform(X_train_eng)
-    X_test = scaler.transform(X_test_eng)
-    X_train = np.nan_to_num(X_train, nan=0.0, posinf=0.0, neginf=0.0)
-    X_test = np.nan_to_num(X_test, nan=0.0, posinf=0.0, neginf=0.0)
-    print(f"        Done. Shape: {X_train.shape}")
-
-    # --- Step 4: Cross-Validation ---
-    print(f"\n  [4/6] Cross-Validation ({CV_FOLDS}-fold stratified):")
-    models = get_models()
-    cv_results = evaluate_models(models, X_train, y)
-
-    # --- Step 5: Select Best Model ---
-    print(f"\n  [5/6] Model Selection:")
-    best_name = max(cv_results, key=lambda k: cv_results[k]['f1'])
-    best_f1 = cv_results[best_name]['f1']
-
-    for name in sorted(cv_results, key=lambda k: cv_results[k]['f1'], reverse=True):
-        marker = " >> " if name == best_name else "    "
-        print(f"      {marker}{name:15s}: F1={cv_results[name]['f1']:.4f}  "
-              f"Acc={cv_results[name]['acc']:.4f}  AUC={cv_results[name]['roc']:.4f}")
-
-    print(f"\n        Best: {best_name} (CV F1 = {best_f1:.4f})")
-
-    # --- Step 6: Train & Predict ---
-    print(f"\n  [6/6] Final Training & Prediction:")
-    final_model = models[best_name]
-    start = time.time()
-    final_model.fit(X_train, y)
-    print(f"        Trained {best_name} on {len(y)} samples in {time.time()-start:.1f}s")
-
-    predictions = final_model.predict(X_test)
-    output = pd.DataFrame({
+    X_train_scaled = scaler.fit_transform(X_train_engineered)
+    X_test_scaled = scaler.transform(X_test_engineered)
+    
+    # Handle any NaN or infinite values
+    X_train_scaled = np.nan_to_num(X_train_scaled, nan=0.0, posinf=0.0, neginf=0.0)
+    X_test_scaled = np.nan_to_num(X_test_scaled, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    print(f"  Scaled data shape: {X_train_scaled.shape}")
+    
+    # Step 4: Model evaluation with cross-validation
+    print(f"\n[Step 4/6] Cross-validation ({NUM_FOLDS} folds)...")
+    all_models = build_models()
+    results = evaluate_model_performance(all_models, X_train_scaled, y_train)
+    
+    # Step 5: Select best model
+    print("\n[Step 5/6] Selecting best model...")
+    best_model_name = max(results, key=lambda name: results[name]['f1_mean'])
+    
+    print("\n  Model Rankings (by F1 Score):")
+    for name in sorted(results, key=lambda n: results[n]['f1_mean'], reverse=True):
+        is_best = " *** SELECTED ***" if name == best_model_name else ""
+        print(f"    {name:12s}: F1={results[name]['f1_mean']:.4f}, "
+              f"Acc={results[name]['accuracy_mean']:.4f}, "
+              f"AUC={results[name]['auc_mean']:.4f}{is_best}")
+    
+    print(f"\n  Best model: {best_model_name}")
+    print(f"  Cross-validated F1 Score: {results[best_model_name]['f1_mean']:.4f}")
+    
+    # Step 6: Train final model and make predictions
+    print("\n[Step 6/6] Training final model and generating predictions...")
+    final_model = all_models[best_model_name]
+    
+    train_start = time.time()
+    final_model.fit(X_train_scaled, y_train)
+    train_time = time.time() - train_start
+    
+    print(f"  Model trained in {train_time:.1f} seconds")
+    
+    # Generate predictions
+    predictions = final_model.predict(X_test_scaled)
+    
+    # Create submission file
+    submission = pd.DataFrame({
         'ID': test_ids.astype(int),
-        'CLASS': predictions.astype(int),
+        'CLASS': predictions.astype(int)
     })
-
-    # Verify output format
-    assert len(output) == len(test_ids), f'Row count mismatch: {len(output)} vs {len(test_ids)}'
-    assert list(output.columns) == ['ID', 'CLASS'], f'Column mismatch: {list(output.columns)}'
-    assert (output['ID'].values == test_ids).all(), 'ID order mismatch'
-
-    output.to_csv(OUTPUT_PATH, index=False)
-
-    n0, n1 = int((output['CLASS'] == 0).sum()), int((output['CLASS'] == 1).sum())
-    print(f"        Saved {OUTPUT_PATH}: {len(output)} rows  "
-          f"(Normal={n0}, Faulty={n1}, ratio={n0/max(n1,1):.2f}:1)")
-
-    print(f"\n{'='*65}")
-    print("  DONE - FINAL.csv ready for submission")
-    print(f"{'='*65}")
+    
+    # Verify submission format
+    assert len(submission) == len(test_ids), "Submission row count mismatch"
+    assert list(submission.columns) == ['ID', 'CLASS'], "Submission column mismatch"
+    
+    submission.to_csv(SUBMISSION_FILE, index=False)
+    
+    # Print prediction summary
+    normal_count = (predictions == 0).sum()
+    fault_count = (predictions == 1).sum()
+    print(f"\n  Predictions saved to {SUBMISSION_FILE}")
+    print(f"  Total predictions: {len(predictions)}")
+    print(f"  Predicted Normal: {normal_count}")
+    print(f"  Predicted Fault: {fault_count}")
+    print(f"  Normal:Fault ratio: {normal_count/max(fault_count, 1):.2f}:1")
+    
+    print("\n" + "=" * 70)
+    print("  PIPELINE COMPLETED SUCCESSFULLY")
+    print("  Submission file ready: FINAL.csv")
+    print("=" * 70)
 
 
 if __name__ == '__main__':
