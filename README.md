@@ -1,240 +1,91 @@
-# 🤖 Binary Fault Detection System
-### IEEE SB GEHU | Machine Learning Challenge
+# Binary Fault Detection - ML Challenge
+**Team Tech Ninjas | IEEE SB GEHU**
 
-[![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/Status-Competition%20Ready-success.svg)]()
+## Overview
 
----
+Binary classification to predict device status (Normal/Fault) from 47 sensor readings. We used preprocessing + feature engineering + ensemble models, with **LightGBM** giving the best results.
 
-## 📊 Overview
+**Results:**
+- Accuracy: 98.78%
+- F1-Score: 98.48%
+- ROC-AUC: 99.92%
 
-Binary classification system for industrial sensor fault detection achieving **98.78% accuracy** and **98.48% F1-score** through ensemble learning and advanced feature engineering.
+## Dataset
 
-**🏆 Key Results:**
-- ✅ 98.78% Accuracy | 98.48% F1-Score | 99.92% ROC-AUC
-- 🔧 83 features (36 preprocessed + 47 engineered)
-- ⚡ 14.5s training time with LightGBM
-- 🎯 Production-ready modular architecture
+- Training: 43,776 samples × 47 features (738 duplicates removed → 43,038)
+- Test: 10,944 samples
+- Classes: Normal (60%) / Fault (40%)
+- No missing values
 
----
-
-## 🎯 Problem Statement
-
-**Objective:** Predict device operational status (Normal/Fault) from 47 sensor readings
-
-**Dataset:**
-- Training: 43,776 samples × 47 features
-- Class distribution: 60% Normal / 40% Fault
-- No missing values, 738 duplicates removed
-
----
-
-## 🔄 Pipeline Architecture
+## Pipeline
 
 ```
-📥 Raw Data (43,776 samples)
-    ↓
-🧹 Data Cleaning → Remove duplicates (43,038 samples)
-    ↓
-📊 Preprocessing Pipeline
-    ├─ Outlier Treatment (Winsorization 1-99%)
-    ├─ Skewness Correction (Yeo-Johnson: 44→0 skewed)
-    ├─ Multicollinearity Removal (|r|>0.9: 47→36 features)
-    └─ Normalization (StandardScaler)
-    ↓
-🔧 Feature Engineering (+47 features)
-    ├─ Interactions (8): F01×F09, F29×F19
-    ├─ Ratios (3): F01/F09, F29/F21
-    ├─ Aggregates (22): row/group statistics
-    ├─ Polynomials (6): F01², F09², F29²
-    └─ Others (8): absolute values, cross-groups
-    ↓
-🤖 Model Training (5-Fold CV)
-    ├─ 🥇 LightGBM (F1: 0.9848) ✓
-    ├─ 🥈 XGBoost (F1: 0.9832)
-    └─ 🥉 ExtraTrees (F1: 0.9778)
-    ↓
-🎯 Final Predictions
+Raw Data (43,776)
+  → Remove duplicates (43,038)
+  → Outlier capping (1st-99th percentile)
+  → Yeo-Johnson transform (fixed 44 skewed features)
+  → Drop correlated features (47 → 36, threshold |r| > 0.9)
+  → StandardScaler
+  → Feature Engineering (36 → 83 features)
+  → Model Training (5-fold Stratified CV)
+  → Predictions
 ```
 
----
+## Feature Engineering
 
-## 📈 Performance Metrics
+We created 47 new features from the preprocessed 36:
 
-| Model | F1-Score | Accuracy | ROC-AUC | Training Time |
-|-------|----------|----------|---------|---------------|
-| **LightGBM** ✓ | **0.9848** | **0.9878** | **0.9992** | **14.5s** |
-| XGBoost | 0.9832 | 0.9866 | 0.9990 | 22.3s |
-| ExtraTrees | 0.9778 | 0.9824 | 0.9990 | 18.7s |
+| Type | Count | Details |
+|------|-------|---------|
+| Interactions | 8 | Pairs like F05×F09, F06×F07, F19×F21 |
+| Ratios | 3 | F19/F09, F21/F09, F05/F06 |
+| Row-wise stats | 11 | mean, std, min, max, range, median, skew, kurtosis, etc. |
+| Group stats | 11 | Stats for early/middle/high/late sensor groups |
+| Polynomial | 6 | Squared values of top features (F05², F09², etc.) |
+| Absolute | 6 | |F05|, |F06|, |F07|, |F09|, |F19|, |F21| |
+| Cross-group | 2 | early×middle, early×high interactions |
 
-**Confusion Matrix (Estimated):**
-- False Positive Rate: ~1.2%
-- False Negative Rate: ~1.2%
+Top predictors from our analysis: **F05, F06, F07, F09, F19, F21**
 
----
+## Models Compared
 
-## 📁 Project Structure
+| Model | F1-Score | Accuracy | ROC-AUC |
+|-------|----------|----------|---------|
+| **LightGBM** | **0.9848** | **0.9878** | **0.9992** |
+| XGBoost | 0.9832 | 0.9866 | 0.9990 |
+| ExtraTrees | 0.9778 | 0.9824 | 0.9990 |
+
+LightGBM config: n_estimators=800, learning_rate=0.05, num_leaves=100, colsample_bytree=0.7
+
+## Files
 
 ```
-MLChallenge/
-├── README.md                          # Documentation
-├── requirements.txt                   # Dependencies
-│
-├── datacheck.ipynb                    # EDA & visualization
-├── preprocessing.ipynb                # Data preprocessing
-├── improved_model.py                  # Feature engineering + training
-│
-├── TRAIN.csv                          # Raw training data
-├── TEST.csv                           # Raw test data
-├── TRAIN_PREPROCESSED.csv             # Cleaned training data
-├── TEST_PREPROCESSED.csv              # Cleaned test data
-└── FINAL.csv                          # Submission file
+datacheck.ipynb          - EDA and data exploration
+preprocessing.ipynb      - Data cleaning pipeline
+improved_model.py        - Feature engineering + model training
+TRAIN.csv / TEST.csv     - Raw data
+TRAIN_PREPROCESSED.csv   - Cleaned training data
+TEST_PREPROCESSED.csv    - Cleaned test data
+FINAL.csv                - Final predictions
+requirements.txt         - Python dependencies
 ```
 
----
-
-## 🚀 Quick Start
-
-### Prerequisites
-- Python 3.8+
-- 4GB RAM minimum
-
-### Installation
+## How to Run
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
-```
 
-**Required packages:**
-```
-numpy>=1.21.0
-pandas>=1.3.0
-scikit-learn>=1.0.0
-lightgbm>=3.3.0
-xgboost>=1.5.0
-matplotlib>=3.4.0
-seaborn>=0.11.0
-scipy>=1.7.0
-```
-
-### Usage
-
-**Option 1: Full Pipeline**
-```bash
+# run notebooks first for preprocessing, then:
 python improved_model.py
 ```
 
-**Option 2: Step-by-Step**
-```bash
-# 1. Exploratory analysis
-jupyter notebook datacheck.ipynb
+Output: `FINAL.csv` with columns [ID, CLASS]
 
-# 2. Preprocessing
-jupyter notebook preprocessing.ipynb
+## Team
 
-# 3. Model training
-python improved_model.py
-```
+**Team Tech Ninjas**
+Graphic Era Hill University, Dehradun
+B.Tech CSE (AI & ML), 3rd Year
 
-**Output:** `FINAL.csv` with predictions (ID, CLASS)
-
----
-
-## 🔧 Technical Details
-
-### Preprocessing Pipeline
-
-| Step | Method | Impact |
-|------|--------|--------|
-| **Cleaning** | Duplicate removal | 43,776 → 43,038 samples |
-| **Outliers** | Winsorization (1-99%) | ~2% values capped |
-| **Skewness** | Yeo-Johnson transform | 44 → 0 skewed features |
-| **Multicollinearity** | Correlation threshold (0.9) | 47 → 36 features |
-| **Normalization** | StandardScaler | z-score standardization |
-
-### Feature Engineering
-
-**47 engineered features** capturing sensor interactions:
-
-| Category | Count | Examples |
-|----------|-------|----------|
-| Interactions | 8 | F01×F09, F29×F19 |
-| Ratios | 3 | F01/F09, F29/F21 |
-| Row Aggregates | 11 | mean, std, min, max, skew, kurtosis |
-| Group Aggregates | 11 | early/mid/late sensor statistics |
-| Polynomials | 6 | F01², F09², F29² |
-| Absolute Values | 6 | \|F01\|, \|F09\|, \|F29\| |
-| Cross-groups | 2 | early_mean × late_mean |
-
-### Model Configuration
-
-**LightGBM Hyperparameters:**
-```python
-{
-    'objective': 'binary',
-    'boosting_type': 'gbdt',
-    'num_leaves': 31,
-    'learning_rate': 0.05,
-    'feature_fraction': 0.9,
-    'bagging_fraction': 0.8,
-    'bagging_freq': 5
-}
-```
-
-**Validation:** Stratified 5-Fold Cross-Validation
-
----
-
-## 📊 Key Insights
-
-### Data Analysis
-- 738 duplicate rows (1.7%) removed
-- 44/47 features highly skewed (|skew| > 1)
-- 10 feature pairs highly correlated (|r| > 0.9)
-- Top predictors: F01, F09, F29, F19, F21
-
-### Model Selection
-- LightGBM selected for best F1-score and efficiency
-- Ensemble methods outperform single models
-- Feature engineering improved performance by ~2%
-
----
-
-## 🔄 Reproducibility
-
-All results are reproducible with:
-- ✅ Fixed random seed (`random_state=42`)
-- ✅ Pinned package versions (`requirements.txt`)
-- ✅ Stratified cross-validation
-- ✅ Saved preprocessed data
-
----
-
-## 👥 Team
-
-**Team Name:** Tech Ninjas  
-**Institution:** Graphic Era Hill University, Dehradun  
-**Program:** B.Tech CSE (AI & ML), 3rd Year
-
-**Members:**
-- Rajat Pundir (Team Lead)
-- Sidh Khurana
-
----
-
-## 📜 License
-
-MIT License - see [LICENSE](LICENSE) file for details
-
----
-
-## 🙏 Acknowledgments
-
-- **Competition:** IEEE Student Branch, GEHU
-- **Libraries:** scikit-learn, LightGBM, XGBoost, pandas, NumPy
-
----
-
-**⭐ Star this repo if you found it helpful!**
+- **Rajat Pundir** - Team Lead
+- **Sidh Khurana**
