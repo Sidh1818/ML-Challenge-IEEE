@@ -22,9 +22,15 @@ TEST_FILE = 'TEST_PREPROCESSED.csv'
 SUBMISSION_FILE = 'FINAL.csv'
 NUM_FOLDS = 5
 
+# ============================================================================
+# FEATURE ENGINEERING FUNCTIONS
+# ============================================================================
 
 def create_interaction_features(data, cols):
-    """Multiply important sensor pairs together."""
+    """
+    Multiply important sensor pairs together.
+    Creates 8 interaction features from top predictors (F05, F06, F07, F09, F19, F21).
+    """
     df = data.copy()
     
     important_pairs = [
@@ -42,7 +48,10 @@ def create_interaction_features(data, cols):
 
 
 def create_ratio_features(data):
-    """Ratio features for key sensor pairs."""
+    """
+    Ratio features for key sensor pairs.
+    Creates 3 ratio features - helps capture relative relationships between sensors.
+    """
     df = data.copy()
     
     ratio_pairs = [('F19', 'F09'), ('F21', 'F09'), ('F05', 'F06')]
@@ -55,7 +64,11 @@ def create_ratio_features(data):
 
 
 def create_statistical_features(data, feature_columns):
-    """Row-wise stats across all sensors."""
+    """
+    Row-wise stats across all sensors.
+    Creates 11 statistical features - mean, std, min, max, range, median, skew, kurtosis, etc.
+    Captures overall sensor behavior patterns for each sample.
+    """
     df = data.copy()
     sensor_values = df[feature_columns].values
     df['sensors_mean'] = np.mean(sensor_values, axis=1)
@@ -74,7 +87,11 @@ def create_statistical_features(data, feature_columns):
 
 
 def create_group_features(data):
-    """Group sensors and get stats per group."""
+    """
+    Group sensors and get stats per group.
+    Creates 11 group-based features + 2 cross-group interactions.
+    Groups: early (F02-F09), middle (F10-F18), high_range (F30-F36), late (F39-F47).
+    """
     df = data.copy()
     
     groups = {
@@ -105,7 +122,11 @@ def create_group_features(data):
 
 
 def create_polynomial_features(data):
-    """Squared and absolute features for top predictors."""
+    """
+    Squared and absolute features for top predictors.
+    Creates 12 features (6 squared + 6 absolute) for sensors: F05, F06, F07, F09, F19, F21.
+    Helps capture non-linear relationships.
+    """
     df = data.copy()
     top_sensors = ['F05', 'F06', 'F07', 'F09', 'F19', 'F21']
     
@@ -118,7 +139,10 @@ def create_polynomial_features(data):
 
 
 def engineer_all_features(data, original_features):
-    """Run all feature engineering steps."""
+    """
+    Run all feature engineering steps.
+    Takes 36 preprocessed features -> creates 47 new features -> returns 83 total features.
+    """
     print("    Creating interaction features...")
     data = create_interaction_features(data, original_features)
     
@@ -136,9 +160,15 @@ def engineer_all_features(data, original_features):
     
     return data
 
+# ============================================================================
+# MODEL BUILDING & EVALUATION
+# ============================================================================
 
 def build_models():
-    """Set up the models we're comparing."""
+    """
+    Set up the models we're comparing.
+    XGBoost, LightGBM, and ExtraTrees with tuned hyperparameters.
+    """
     models = {}
     
     models['XGBoost'] = XGBClassifier(
@@ -182,7 +212,10 @@ def build_models():
 
 
 def evaluate_model_performance(models, X_train, y_train):
-    """Cross-validate all models and compare."""
+    """
+    Cross-validate all models and compare.
+    Uses 5-fold Stratified CV to evaluate F1, Accuracy, and ROC-AUC scores.
+    """
     cv_splitter = StratifiedKFold(n_splits=NUM_FOLDS, shuffle=True, random_state=SEED)
     performance_results = {}
     
@@ -213,6 +246,9 @@ def evaluate_model_performance(models, X_train, y_train):
     
     return performance_results
 
+# ============================================================================
+# MAIN PIPELINE
+# ============================================================================
 
 def main():
     print("=" * 70)
@@ -220,7 +256,9 @@ def main():
     print("  Team Tech Ninjas | IEEE SB GEHU")
     print("=" * 70)
     
-    # load data
+    # ========================================================================
+    # Step 1: Load preprocessed data
+    # ========================================================================
     print("\n[Step 1/6] Loading preprocessed data...")
     train_data = pd.read_csv(TRAIN_FILE)
     test_data = pd.read_csv(TEST_FILE)
@@ -238,7 +276,9 @@ def main():
     print(f"  Normal cases: {(y_train == 0).sum()}")
     print(f"  Fault cases: {(y_train == 1).sum()}")
     
-    # feature engineering
+    # ========================================================================
+    # Step 2: Feature engineering (36 -> 83 features)
+    # ========================================================================
     print("\n[Step 2/6] Engineering new features...")
     X_train_engineered = engineer_all_features(X_train_raw, original_features)
     X_test_engineered = engineer_all_features(X_test_raw, original_features)
@@ -248,7 +288,9 @@ def main():
     print(f"  Total features after engineering: {total_features}")
     print(f"  New features created: {new_features}")
     
-    # scaling
+    # ========================================================================
+    # Step 3: Scale features (StandardScaler)
+    # ========================================================================
     print("\n[Step 3/6] Scaling features...")
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train_engineered)
@@ -259,12 +301,16 @@ def main():
     
     print(f"  Scaled data shape: {X_train_scaled.shape}")
     
-    # cross-validation
+    # ========================================================================
+    # Step 4: Cross-validation (5-fold Stratified CV)
+    # ========================================================================
     print(f"\n[Step 4/6] Cross-validation ({NUM_FOLDS} folds)...")
     all_models = build_models()
     results = evaluate_model_performance(all_models, X_train_scaled, y_train)
     
-    # pick best model
+    # ========================================================================
+    # Step 5: Select best model based on F1 score
+    # ========================================================================
     print("\n[Step 5/6] Selecting best model...")
     best_model_name = max(results, key=lambda name: results[name]['f1_mean'])
     
@@ -278,7 +324,9 @@ def main():
     print(f"\n  Best model: {best_model_name}")
     print(f"  Cross-validated F1 Score: {results[best_model_name]['f1_mean']:.4f}")
     
-    # train final model and predict
+    # ========================================================================
+    # Step 6: Train final model and generate predictions
+    # ========================================================================
     print("\n[Step 6/6] Training final model and generating predictions...")
     final_model = all_models[best_model_name]
     
