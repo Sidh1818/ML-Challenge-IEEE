@@ -82,7 +82,6 @@ python improved_model.py
 Output: `FINAL.csv` with columns [ID, CLASS]
 
 ## Team
-
 **Team Tech Ninjas**
 Graphic Era Hill University, Dehradun
 B.Tech CSE (AI & ML), 3rd Year
